@@ -697,6 +697,13 @@ class CriticWorker(Worker):
                                                                             config=critic_model_config,
                                                                             attn_implementation='flash_attention_2',
                                                                             trust_remote_code=trust_remote_code)
+            elif ("Qwen3-VL" in local_path) or ("Qwen3VL" in local_path):
+                from verl.models.transformers.modeling_qwen_3_vl_patch import Qwen3VLForTokenClassification
+                critic_module = Qwen3VLForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
+                                                                              torch_dtype=torch_dtype,
+                                                                              config=critic_model_config,
+                                                                              attn_implementation='flash_attention_2',
+                                                                              trust_remote_code=trust_remote_code)
             else:
                 critic_module = AutoModelForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
                                                                                 torch_dtype=torch_dtype,
@@ -958,11 +965,26 @@ class RewardModelWorker(Worker):
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
             setattr(model_config, 'classifier_dropout', 0.)
-            reward_module = AutoModelForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
-                                                                            config=model_config,
-                                                                            torch_dtype=torch.bfloat16,
-                                                                            attn_implementation='flash_attention_2',
-                                                                            trust_remote_code=trust_remote_code)
+            if ("Qwen3-VL" in local_path) or ("Qwen3VL" in local_path):
+                from verl.models.transformers.modeling_qwen_3_vl_patch import Qwen3VLForTokenClassification
+                reward_module = Qwen3VLForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
+                                                                              config=model_config,
+                                                                              torch_dtype=torch.bfloat16,
+                                                                              attn_implementation='flash_attention_2',
+                                                                              trust_remote_code=trust_remote_code)
+            elif "Qwen2.5-VL" in local_path:
+                from verl.models.transformers.modeling_qwen_2_5_vl_patch import Qwen2_5_VLForTokenClassification
+                reward_module = Qwen2_5_VLForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
+                                                                                config=model_config,
+                                                                                torch_dtype=torch.bfloat16,
+                                                                                attn_implementation='flash_attention_2',
+                                                                                trust_remote_code=trust_remote_code)
+            else:
+                reward_module = AutoModelForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
+                                                                                config=model_config,
+                                                                                torch_dtype=torch.bfloat16,
+                                                                                attn_implementation='flash_attention_2',
+                                                                                trust_remote_code=trust_remote_code)
             reward_module.to(torch.bfloat16)
         auto_wrap_policy = get_fsdp_wrap_policy(module=reward_module, config=self.config.model.fsdp_config)
 

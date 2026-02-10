@@ -15,7 +15,7 @@
 import torch
 from transformers import PretrainedConfig
 
-VALID_CONFIG_TYPE = {"llama", "qwen2", "qwen2_vl", "qwen2_5_vl"}
+VALID_CONFIG_TYPE = {"llama", "qwen2", "qwen2_vl", "qwen2_5_vl", "qwen3_vl"}
 
 
 def get_device_flops(unit="T"):
@@ -70,7 +70,8 @@ class FlopsCounter:
             'qwen2': self._estimate_qwen2_flops,
             'llama': self._estimate_qwen2_flops,
             'qwen2_vl': self._estimate_qwen2_flops,
-            'qwen2_5_vl': self._estimate_qwen2_flops
+            'qwen2_5_vl': self._estimate_qwen2_flops,
+            'qwen3_vl': self._estimate_qwen2_flops,
         }
         self.config = config
 

@@ -101,8 +101,8 @@ class vLLMRollout(BaseRollout):
 
         max_model_len=config.get("max_trajectory_length",config.prompt_length + config.response_length)
         # print(f"[DEBUG] max_trajectory_length: {config.max_trajectory_length}")
-        # if model is qwenvl
-        if "Qwen2.5-VL" in model_path:
+        # If model is Qwen-VL family, enable vLLM multimodal limits.
+        if ("Qwen2.5-VL" in model_path):
             self.inference_engine = LLM(
                 model=model_path,
                 enable_sleep_mode=True,

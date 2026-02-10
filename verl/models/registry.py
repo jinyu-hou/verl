@@ -19,7 +19,7 @@ import torch.nn as nn
 
 # Supported models using HF Rmpad
 # TODO(sgm): HF may supported more than listed here, we should add more after testing
-_MODELS_SUPPORT_RMPAD = {'llama', 'mistral', 'gemma', 'qwen2', 'qwen2_vl', 'qwen2_5_vl'}
+_MODELS_SUPPORT_RMPAD = {'llama', 'mistral', 'gemma', 'qwen2', 'qwen2_vl', 'qwen2_5_vl', 'qwen3_vl'}
 
 
 def check_model_support_rmpad(model_type: str):
@@ -29,14 +29,52 @@ def check_model_support_rmpad(model_type: str):
                          f"RMPad supported architectures: {_MODELS_SUPPORT_RMPAD}."
                          f"Please set `use_remove_padding=False` in the model config.")
 
-    if model_type in ("qwen2_vl", "qwen2_5_vl"):  # patch remove padding for qwen2vl mrope
+    if model_type in ("qwen2_vl", "qwen2_5_vl", "qwen3_vl"):  # patch remove padding for Qwen-VL mrope
+        # NOTE: Qwen-VL model internals changed across families. We apply the patch
+        # opportunistically to any known FlashAttention2 block class that exists in
+        # the installed `transformers`. If a class can't be imported, we skip it.
         from verl.models.transformers.qwen2_vl import ulysses_flash_attn_forward
-        from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLFlashAttention2
-        from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLFlashAttention2
 
-        Qwen2VLFlashAttention2.forward = ulysses_flash_attn_forward
-        Qwen2_5_VLFlashAttention2.forward = ulysses_flash_attn_forward
-        print("Qwen2vl patch applied!")
+        patched = []
+        import_errors = []
+
+        # Qwen2-VL
+        try:
+            from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLFlashAttention2
+            Qwen2VLFlashAttention2.forward = ulysses_flash_attn_forward
+            patched.append("Qwen2VLFlashAttention2")
+        except Exception as e:
+            import_errors.append(("Qwen2VLFlashAttention2", e))
+
+        # Qwen2.5-VL
+        try:
+            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLFlashAttention2
+            Qwen2_5_VLFlashAttention2.forward = ulysses_flash_attn_forward
+            patched.append("Qwen2_5_VLFlashAttention2")
+        except Exception as e:
+            import_errors.append(("Qwen2_5_VLFlashAttention2", e))
+
+        # Qwen3-VL (different naming across transformers versions)
+        for mod_path, cls_name in (
+            ("transformers.models.qwen3_vl.modeling_qwen3_vl", "Qwen3VLFlashAttention2"),
+            ("transformers.models.qwen3_vl.modeling_qwen3_vl", "Qwen3_VLFlashAttention2"),
+        ):
+            try:
+                module = importlib.import_module(mod_path)
+                cls = getattr(module, cls_name)
+                cls.forward = ulysses_flash_attn_forward
+                patched.append(cls_name)
+            except Exception as e:
+                import_errors.append((cls_name, e))
+
+        if patched:
+            print(f"Qwen-VL remove-padding patch applied: {patched}")
+        else:
+            # Don't fail hard: allow training to proceed without the patch.
+            print(
+                "Warning: Qwen-VL remove-padding patch was not applied (couldn't import a known FlashAttention2 "
+                f"class for model_type={model_type})."
+            )
 
 
 # Supported models in Megatron-LM
