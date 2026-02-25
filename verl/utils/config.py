@@ -12,57 +12,109 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses as _dc
 from dataclasses import is_dataclass
 from typing import Any, Optional
 
-from omegaconf import DictConfig, ListConfig, OmegaConf
+from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
 
 __all__ = ["omega_conf_to_dataclass", "validate_config"]
 
 
+def _get_dataclass_defaults(dc_type) -> dict:
+    """Recursively extract non-MISSING default values from a dataclass type.
+
+    MISSING fields (required fields with no default) are skipped so that the
+    returned dict can be used as a non-struct OmegaConf base without triggering
+    MissingMandatoryValue errors.
+
+    _target_ is also excluded: it is a Hydra convention and should only appear
+    when explicitly set by the user config, not defaulted to '' from BaseConfig.
+    """
+    result = {}
+    for f in _dc.fields(dc_type):
+        # Skip Hydra's _target_ — an empty default would trigger instantiate('') later
+        if f.name == "_target_":
+            continue
+        if f.default is not _dc.MISSING:
+            val = f.default
+        elif f.default_factory is not _dc.MISSING:
+            try:
+                val = f.default_factory()
+            except Exception:
+                continue
+        else:
+            continue  # Truly MISSING (mandatory) — skip
+        if _dc.is_dataclass(val):
+            result[f.name] = _get_dataclass_defaults(type(val))
+        else:
+            result[f.name] = val
+    return result
+
+
 def omega_conf_to_dataclass(config: DictConfig | dict, dataclass_type: Optional[type[Any]] = None) -> Any:
     """
-    Convert an OmegaConf DictConfig to a dataclass.
+    Convert an OmegaConf DictConfig to a dataclass instance.
 
     Args:
         config: The OmegaConf DictConfig or dict to convert.
-        dataclass_type: The dataclass type to convert to. When dataclass_type is None,
-            the DictConfig must contain _target_ to be instantiated via hydra.instantiate API.
+        dataclass_type: When provided, merge config on top of dataclass defaults,
+            filter to known fields, and instantiate the dataclass (running __post_init__).
+            Extra keys not in the dataclass schema are silently dropped, avoiding
+            struct-mode rejection of project-specific keys (e.g. grad_norm_threshold).
+            When None, the config must contain _target_ for Hydra instantiate, or is
+            returned as-is for backward compatibility.
 
     Returns:
-        The dataclass instance.
+        A dataclass instance (when dataclass_type is given),
+        or the Hydra-instantiated object / raw config (when dataclass_type is None).
     """
     # Got an empty config
     if not config:
         return dataclass_type if dataclass_type is None else dataclass_type()
-    # Got an object
+    # Got a non-config object (e.g. already an HFModelConfig instance)
     if not isinstance(config, DictConfig | ListConfig | dict | list):
         return config
 
     if dataclass_type is None:
-        assert "_target_" in config, (
-            "When dataclass_type is not provided, config must contain _target_. "
-            "See trainer/config/ppo_trainer.yaml algorithm section for an example. "
-            f"Got config: {config}"
-        )
+        # Only route to Hydra instantiate when _target_ is present AND non-empty.
+        # BaseConfig sets _target_='' as a default which must not trigger instantiate.
+        _target = config.get("_target_", None) if isinstance(config, (DictConfig, dict)) else None
+        if not _target:
+            return config
         from hydra.utils import instantiate
 
         return instantiate(config, _convert_="partial")
 
     if not is_dataclass(dataclass_type):
         raise ValueError(f"{dataclass_type} must be a dataclass")
-    cfg = OmegaConf.create(config)  # in case it's a dict
-    # pop _target_ to avoid hydra instantiate error, as most dataclass do not have _target_
-    # Updated (vermouth1992) We add _target_ to BaseConfig so that it is compatible.
-    # Otherwise, this code path can't support recursive instantiation.
-    # if "_target_" in cfg:
-    #     cfg.pop("_target_")
-    cfg_from_dataclass = OmegaConf.structured(dataclass_type)
-    # let cfg override the existing vals in `cfg_from_dataclass`
-    cfg_merged = OmegaConf.merge(cfg_from_dataclass, cfg)
-    # now convert to `dataclass_type`
-    config_object = OmegaConf.to_object(cfg_merged)
-    return config_object
+
+    # Convert the user config to a plain container to strip any struct-mode constraints,
+    # then rebuild as a plain (non-struct) OmegaConf DictConfig.
+    if isinstance(config, DictConfig | ListConfig):
+        cfg_container = OmegaConf.to_container(config, resolve=False, throw_on_missing=False)
+    else:
+        cfg_container = config
+
+    # Build non-struct defaults from the dataclass, skipping MISSING fields.
+    # Using non-struct OmegaConf avoids:
+    #   - struct-mode rejection of project-specific extra keys (e.g. grad_norm_threshold)
+    #   - nested schema mismatches (e.g. FSDPOptimizerConfig fields in OptimizerConfig slot)
+    #   - MissingMandatoryValue errors from nested configs (e.g. ProfilerConfig.tool)
+    defaults = _get_dataclass_defaults(dataclass_type)
+    cfg_merged = OmegaConf.merge(OmegaConf.create(defaults), OmegaConf.create(cfg_container))
+    # Strip empty _target_ that may have leaked from BaseConfig defaults or user YAML
+    # to prevent downstream omega_conf_to_dataclass(result) from routing to instantiate('').
+    if isinstance(cfg_merged, DictConfig) and cfg_merged.get("_target_", None) == "":
+        with open_dict(cfg_merged):
+            del cfg_merged["_target_"]
+    # Instantiate the dataclass with only the fields it declares, filtering out any
+    # project-specific extra keys. This runs __post_init__ (e.g. HFModelConfig loads
+    # hf_config, tokenizer, etc.) while still tolerating unknown keys in the YAML.
+    known_fields = {f.name for f in _dc.fields(dataclass_type)}
+    merged_container = OmegaConf.to_container(cfg_merged, resolve=True, throw_on_missing=False)
+    init_kwargs = {k: v for k, v in merged_container.items() if k in known_fields}
+    return dataclass_type(**init_kwargs)
 
 
 def update_dict_with_config(dictionary: dict, config: DictConfig):

@@ -105,6 +105,7 @@ class AdvantageEstimator(str, Enum):
     GPG = "gpg"
     RLOO_VECTORIZED = "rloo_vectorized"
     GRPO_VECTORIZED = "grpo_vectorized"
+    TURN_WISE_GAE = "turn_wise_gae"
 
 
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -209,6 +210,88 @@ def get_kl_controller(kl_ctrl):
         raise NotImplementedError
 
 
+@register_adv_est(AdvantageEstimator.TURN_WISE_GAE)
+def compute_turn_wise_gae_advantage_return(
+        token_level_rewards: torch.Tensor,
+        reward_mask: torch.Tensor,
+        values: torch.Tensor, 
+        loss_mask: torch.Tensor,
+        lam: float,
+        high_level_gamma: float
+    ):
+    """Modified GAE calculation that compute two level of advantage and return:
+    high level: per-turn wise
+    low level: token wise
+    there're two level of MDP, where high level is the agentic MDP and low level is the token MDP
+    Args:
+        token_level_rewards: `(torch.Tensor)` (multi-turn reward, per turn reward is given at eos token for each response token sequence)
+            shape: (bs, response_length)
+        reward_mask: `(torch.Tensor)`
+            shape: (bs, response_length). 1 for reward position (end of each llm response)
+        values: `(torch.Tensor)`
+            shape: (bs, response_length)
+        loss_mask: `(torch.Tensor)`
+            shape: (bs, response_length). 1 for llm_raw_response, 0 for environment info and paddings
+        high_level_gamma: `(float)`
+            discounted factor used in RL for per-turn reward
+        lam: `(float)`
+            lambda value when computing Generalized Advantage Estimation
+
+    Returns:
+        advantages: `(torch.Tensor)`
+            shape: (bs, response_length)
+        Returns: `(torch.Tensor)`
+            shape: (bs, response_length)
+    """
+    with torch.no_grad():
+        batch_size, gen_len = token_level_rewards.shape
+        advantages = torch.zeros_like(token_level_rewards)
+        returns = torch.zeros_like(token_level_rewards)
+        
+        for b in range(batch_size):
+            # First, calculate high level advantage and return for eos token of each turn using high level gamma
+            eos_positions=reward_mask[b].nonzero(as_tuple=True)[0]
+            lastgaelam = 0.0
+            for i in range(len(eos_positions) - 1, -1, -1):
+                curr_pos = eos_positions[i]
+                
+                # Get the next value
+                if i < len(eos_positions) - 1:
+                    # Next valid position
+                    next_pos = eos_positions[i + 1]
+                    nextvalue = values[b, next_pos]
+                    
+                else:
+                    # Last valid position
+                    nextvalue = 0.0
+                
+                # Calculate delta using the next valid token
+                delta = token_level_rewards[b, curr_pos] + high_level_gamma * nextvalue - values[b, curr_pos]
+                
+                # Update advantage estimate
+                lastgaelam = delta + high_level_gamma * lam * lastgaelam
+                advantages[b, curr_pos] = lastgaelam
+            
+            for i, pos in enumerate(eos_positions):
+                returns[b, pos] = advantages[b, pos] + values[b, pos]
+            
+            # each token in the sequence has the same advantage
+            cur_adv = 0.0
+            valid_positions = loss_mask[b].nonzero(as_tuple=True)[0]
+            for i in range(len(valid_positions) - 1, -1, -1):
+                curr_pos = valid_positions[i]
+                if curr_pos not in eos_positions:
+                    # Next valid position
+                    advantages[b, curr_pos] = cur_adv
+                else:
+                    # Last valid position
+                    cur_adv=advantages[b, curr_pos]
+        
+        advantages = verl_F.masked_whiten(advantages, reward_mask)
+    
+    return advantages, returns
+                    
+        
 @register_adv_est(AdvantageEstimator.GAE)  # or simply: @register_adv_est("gae")
 def compute_gae_advantage_return(
     token_level_rewards: torch.Tensor,
