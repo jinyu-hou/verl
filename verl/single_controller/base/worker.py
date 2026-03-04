@@ -229,20 +229,15 @@ class Worker(WorkerHelper):
                 # os.environ["HIP_VISIBLE_DEVICES"] = val
 
         if rocr_val:
-            # You must take care if both HIP/CUDA and ROCR env vars are set as they have
-            # different meanings. Both env vars accept either a list of ints or a
-            # list of UUIDs. The ROCR env var is processed first which then reduces
-            # the number of GPUs that HIP can select from.
-            # https://github.com/pytorch/pytorch/pull/144026
-            # To avoid the complexity of this, we simply gives out error if both are set
-            # (Also to keep consistency with ray's practice with 2.45.0).
-            # Otherwise, we will set ROCR_VISIBLE_DEVICES to CUDA_VISIBLE_DEVICES
-            # and remove ROCR_VISIBLE_DEVICES.
             if cuda_val:
-                raise ValueError("Please don't set ROCR_VISIBLE_DEVICES when HIP/CUDA_VISIBLE_DEVICES is set.")
-
-            cuda_val = os.environ.pop("ROCR_VISIBLE_DEVICES")
-            os.environ["CUDA_VISIBLE_DEVICES"] = cuda_val
+                # Slurm sets ROCR_VISIBLE_DEVICES job-wide (e.g. "0,1,2,3") while Ray sets
+                # HIP/CUDA_VISIBLE_DEVICES per-actor (e.g. "0" for the first actor).
+                # CUDA/HIP_VISIBLE_DEVICES is the authoritative per-actor assignment, so
+                # just discard ROCR to avoid the two-stage ROCm filtering conflict.
+                os.environ.pop("ROCR_VISIBLE_DEVICES")
+            else:
+                cuda_val = os.environ.pop("ROCR_VISIBLE_DEVICES")
+                os.environ["CUDA_VISIBLE_DEVICES"] = cuda_val
             rocr_val = None
 
         if is_ray_noset_visible_devices:
